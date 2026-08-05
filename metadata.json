@@ -1,0 +1,6 @@
+{
+  "name": "QuickShow",
+  "description": "Full-stack movie & show ticket booking platform with user authentication, show management, seat booking, and payment integration.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

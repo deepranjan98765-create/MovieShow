@@ -1,0 +1,150 @@
+import axios from "axios"
+import Movie from "../models/Movie.js";
+import Show from "../models/Show.js";
+import { inngest } from "../inngest/index.js";
+import { dummyShowsData, dummyDateTimeData } from "../configs/dummyData.js";
+
+// API to get now playing movies from TMDB API
+export const getNowPlayingMovies = async (req, res)=>{
+    try {
+        if (!process.env.TMDB_API_KEY) {
+            return res.json({ success: true, movies: dummyShowsData });
+        }
+        const { data } = await axios.get('https://api.themoviedb.org/3/movie/now_playing', {
+            headers: {Authorization : `Bearer ${process.env.TMDB_API_KEY}`}
+        })
+
+        const movies = data.results;
+        res.json({success: true, movies: movies})
+    } catch (error) {
+        console.error('TMDB API error, returning dummy shows:', error.message);
+        res.json({success: true, movies: dummyShowsData})
+    }
+}
+
+// API to add a new show to the database
+export const addShow = async (req, res) =>{
+    try {
+        const {movieId, showsInput, showPrice} = req.body
+
+        let movie = await Movie.findById(movieId)
+
+        if(!movie) {
+            // Fetch movie details and credits from TMDB API
+            const [movieDetailsResponse, movieCreditsResponse] = await Promise.all([
+                axios.get(`https://api.themoviedb.org/3/movie/${movieId}`, {
+            headers: {Authorization : `Bearer ${process.env.TMDB_API_KEY}`} }),
+
+                axios.get(`https://api.themoviedb.org/3/movie/${movieId}/credits`, {
+            headers: {Authorization : `Bearer ${process.env.TMDB_API_KEY}`} })
+            ]);
+
+            const movieApiData = movieDetailsResponse.data;
+            const movieCreditsData = movieCreditsResponse.data;
+
+             const movieDetails = {
+                _id: movieId,
+                title: movieApiData.title,
+                overview: movieApiData.overview,
+                poster_path: movieApiData.poster_path,
+                backdrop_path: movieApiData.backdrop_path,
+                genres: movieApiData.genres,
+                casts: movieCreditsData.cast,
+                release_date: movieApiData.release_date,
+                original_language: movieApiData.original_language,
+                tagline: movieApiData.tagline || "",
+                vote_average: movieApiData.vote_average,
+                runtime: movieApiData.runtime,
+             }
+
+             // Add movie to the database
+             movie = await Movie.create(movieDetails);
+        }
+
+        const showsToCreate = [];
+        showsInput.forEach(show => {
+            const showDate = show.date;
+            show.time.forEach((time)=>{
+                const dateTimeString = `${showDate}T${time}`;
+                showsToCreate.push({
+                    movie: movieId,
+                    showDateTime: new Date(dateTimeString),
+                    showPrice,
+                    occupiedSeats: {}
+                })
+            })
+        });
+
+        if(showsToCreate.length > 0){
+            await Show.insertMany(showsToCreate);
+        }
+
+         //  Trigger Inngest event
+         try {
+             await inngest.send({
+                name: "app/show.added",
+                 data: {movieTitle: movie ? movie.title : 'New Movie'}
+             })
+         } catch (e) {
+             console.warn('Inngest send skipped:', e.message);
+         }
+
+        res.json({success: true, message: 'Show Added successfully.'})
+    } catch (error) {
+        console.error(error);
+        res.json({success: false, message: error.message})
+    }
+}
+
+// API to get all shows from the database
+export const getShows = async (req, res) =>{
+    try {
+        const shows = await Show.find({showDateTime: {$gte: new Date()}}).populate('movie').sort({ showDateTime: 1 });
+
+        // filter unique shows
+        const uniqueShows = new Set(shows.map(show => show.movie).filter(Boolean))
+        const resultShows = Array.from(uniqueShows);
+
+        if (resultShows.length === 0) {
+            return res.json({ success: true, shows: dummyShowsData });
+        }
+
+        res.json({success: true, shows: resultShows})
+    } catch (error) {
+        console.error('getShows error, returning dummy data:', error.message);
+        res.json({ success: true, shows: dummyShowsData });
+    }
+}
+
+// API to get a single show from the database
+export const getShow = async (req, res) =>{
+    try {
+        const {movieId} = req.params;
+        // get all upcoming shows for the movie
+        const shows = await Show.find({movie: movieId, showDateTime: { $gte: new Date() }})
+
+        const movie = await Movie.findById(movieId);
+        
+        if (!movie || shows.length === 0) {
+            const fallbackMovie = dummyShowsData.find(m => String(m._id) === String(movieId) || String(m.id) === String(movieId)) || dummyShowsData[0];
+            return res.json({ success: true, movie: fallbackMovie, dateTime: dummyDateTimeData });
+        }
+
+        const dateTime = {};
+
+        shows.forEach((show) => {
+            const date = show.showDateTime.toISOString().split("T")[0];
+            if(!dateTime[date]){
+                dateTime[date] = []
+            }
+            dateTime[date].push({ time: show.showDateTime, showId: show._id })
+        })
+
+        res.json({success: true, movie, dateTime})
+    } catch (error) {
+        console.error('getShow error, returning dummy show:', error.message);
+        const {movieId} = req.params;
+        const fallbackMovie = dummyShowsData.find(m => String(m._id) === String(movieId) || String(m.id) === String(movieId)) || dummyShowsData[0];
+        res.json({ success: true, movie: fallbackMovie, dateTime: dummyDateTimeData });
+    }
+}
